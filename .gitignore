@@ -1,0 +1,7 @@
+*.tflite
+*.pt
+/dataset/
+/faces/
+.venv/
+__pycache__/
+/testing_language
