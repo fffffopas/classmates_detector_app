@@ -30,6 +30,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,8 +51,9 @@ class MainActivity : AppCompatActivity() {
     // Поток, в котором камера вызывает наш analyzer
     private val analysisExecutor = Executors.newSingleThreadExecutor()
 
-    // Область корутин для тяжёлой обработки (детектор)
-    private val processingScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val inferenceExecutor = Executors.newSingleThreadExecutor()
+    private val processingScope =
+        CoroutineScope(SupervisorJob() + inferenceExecutor.asCoroutineDispatcher())
 
     // true = предыдущий кадр ещё обрабатывается
     private val busy = AtomicBoolean(false)
@@ -74,8 +76,14 @@ class MainActivity : AppCompatActivity() {
 
         fpsText = findViewById(R.id.fpsText)
         imageView = findViewById(R.id.imageView)
-        detector = YoloDetector(this)
-        permissionLauncher.launch(android.Manifest.permission.CAMERA)
+        fpsText.text = "Загрузка модели..."
+        processingScope.launch {
+            detector = YoloDetector(this@MainActivity)
+            withContext(Dispatchers.Main){
+                permissionLauncher.launch(android.Manifest.permission.CAMERA)
+            }
+        }
+
     }
 
     private fun startCamera() {
@@ -198,6 +206,9 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         processingScope.cancel()
         analysisExecutor.shutdown()
-        detector.close()
+        inferenceExecutor.execute {
+            if (::detector.isInitialized) detector.close()
+        }
+        inferenceExecutor.shutdown()
     }
 }

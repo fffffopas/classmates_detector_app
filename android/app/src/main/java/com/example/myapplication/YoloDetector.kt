@@ -12,8 +12,10 @@ import java.io.FileInputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
-import kotlin.math.max
 import kotlin.math.min
+
+import org.tensorflow.lite.gpu.CompatibilityList
+import org.tensorflow.lite.gpu.GpuDelegate
 
 data class Detection(val box: RectF, val score: Float, val classId: Int)
 
@@ -24,6 +26,8 @@ class YoloDetector(
     private val threshold: Float = 0.35f
 ) {
     private val interpreter: Interpreter
+
+    private var gpuDelegate: GpuDelegate? = null
 
     private val inputBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3).order(ByteOrder.nativeOrder())
@@ -37,11 +41,38 @@ class YoloDetector(
     private val output = Array(1){Array(300){ FloatArray(6) } }
 
     init {
-        val options = Interpreter.Options().apply {setNumThreads(4)} // --------
+        val options = Interpreter.Options()
+        var usingGpu = false
+
+        CompatibilityList().use {compat ->
+            if (compat.isDelegateSupportedOnThisDevice){
+                try {
+                    val gpuOption = compat.bestOptionsForThisDevice.apply {
+                        setSerializationParams(
+                            context.cacheDir.absolutePath,
+                            "yolo26n_416_v1"
+                        )
+                    }
+                    gpuDelegate = GpuDelegate(gpuOption)
+                    options.addDelegate(gpuDelegate)
+                    usingGpu = true
+                } catch (e: Exception){
+                    android.util.Log.e("YOLO", "GPU не запустился", e)
+                    gpuDelegate?.close()
+                    gpuDelegate = null
+                }
+            }
+
+        }
+
+        if (!usingGpu) options.setNumThreads(4)
+        android.util.Log.d("YOLO", "GPU delegate: $usingGpu")
+
         interpreter = Interpreter(loadModel(context, modelName), options)
 
         val shape = interpreter.getOutputTensor(0).shape()
         val inshape = interpreter.getInputTensor(0).shape()
+
         require(shape.size == 3 && shape[1] == 300 && shape[2] == 6){
             "Неожиданная форма выхода"
         }
@@ -88,8 +119,6 @@ class YoloDetector(
         inputBuffer.rewind()
 
         interpreter.run(inputBuffer, output)
-        val best = output[0].maxByOrNull { it[4] }!!
-        android.util.Log.d("YOLO", "best row: ${best.joinToString()}")
 
         val result = ArrayList<Detection>()
         for (row in output[0]){
@@ -111,7 +140,10 @@ class YoloDetector(
         }
         return result
     }
-    fun close() = interpreter.close()
+    fun close(){
+        interpreter.close()
+        gpuDelegate?.close()
+    }
 }
 
 val COCO_LABELS = listOf(
