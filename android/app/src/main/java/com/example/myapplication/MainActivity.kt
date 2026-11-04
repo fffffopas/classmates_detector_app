@@ -1,5 +1,9 @@
 package com.example.myapplication
 
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+
 import android.util.Size
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
@@ -31,6 +35,11 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
+
+    private lateinit var detector: YoloDetector
+
+    @Volatile
+    private var lastInferenceMs = 0L
 
     private lateinit var fpsText: TextView
     private var frameCount = 0
@@ -65,6 +74,7 @@ class MainActivity : AppCompatActivity() {
 
         fpsText = findViewById(R.id.fpsText)
         imageView = findViewById(R.id.imageView)
+        detector = YoloDetector(this)
         permissionLauncher.launch(android.Manifest.permission.CAMERA)
     }
 
@@ -106,7 +116,7 @@ class MainActivity : AppCompatActivity() {
                             frameCount++
                             val now = SystemClock.elapsedRealtime()
                             if (now - lastFpsTime >= 1000){
-                                fpsText.text = "FPS: $frameCount"
+                                fpsText.text = "FPS: $frameCount | detect: ${lastInferenceMs} ms"
                                 frameCount = 0
                                 lastFpsTime = now
                             }
@@ -127,16 +137,67 @@ class MainActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    // ЗАГЛУШКА детектора: сейчас только поворачивает кадр
-    private suspend fun detect(bitmap: Bitmap, rotation: Int): Bitmap {
-        // сюда позже вставишь модель/детектор
-        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    private val displayBitmaps = arrayOfNulls<Bitmap>(2)
+    private var displayIndex = 0
+    private fun detect(src: Bitmap, rotation: Int): Bitmap {
+        val swap = rotation % 180 != 0
+        val uw = if (swap) src.height else src.width
+        val uh = if (swap) src.width else src.height
+
+        var out = displayBitmaps[displayIndex]
+        if (out == null || out.width != uw || out.height != uh){
+            out = Bitmap.createBitmap(uw, uh, Bitmap.Config.ARGB_8888)
+            displayBitmaps[displayIndex] = out
+        }
+
+        displayIndex = displayIndex xor 1
+
+        val t0 = SystemClock.elapsedRealtime()
+        val detections = detector.detect(src, rotation)
+        lastInferenceMs = SystemClock.elapsedRealtime() - t0
+
+        val matrix = Matrix().apply {
+            postTranslate(-src.width / 2f, -src.height / 2f)
+            postRotate(rotation.toFloat())
+            postTranslate(uw / 2f, uh / 2f)
+        }
+        Canvas(out).drawBitmap(src, matrix, null)
+        drawDetection(out, detections)
+        return out
+    }
+
+    private fun drawDetection(bitmap: Bitmap, detections: List<Detection>){
+        val canvas = Canvas(bitmap)
+        val stroke = bitmap.width / 200f
+        val boxPaint = Paint().apply {
+            color = Color.GREEN
+            style = Paint.Style.STROKE
+            strokeWidth = stroke
+        }
+
+        val textPaint = Paint().apply {
+            color = Color.BLUE
+            textSize = bitmap.width / 28f
+            isAntiAlias = true
+        }
+
+        for (d in detections){
+            canvas.drawRect(d.box, boxPaint)
+            val label = COCO_LABELS.getOrElse(d.classId) {"id${d.classId}"}
+            canvas.drawText(
+                    "$label ${(d.score* 100).toInt()}%",
+                    d.box.left,
+                    (d.box.top - stroke).coerceAtLeast(textPaint.textSize),
+                    textPaint
+            )
+
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         processingScope.cancel()
         analysisExecutor.shutdown()
+        detector.close()
     }
 }
