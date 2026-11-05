@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.RectF
+import android.os.SystemClock
 import org.tensorflow.lite.Interpreter
 import java.io.FileInputStream
 import java.nio.ByteBuffer
@@ -22,7 +23,7 @@ data class Detection(val box: RectF, val score: Float, val classId: Int)
 class YoloDetector(
     context: Context,
     modelName: String = "yolo26n.tflite",
-    private val inputSize: Int = 416, // ----------
+    private val inputSize: Int = 640, // ----------
     private val threshold: Float = 0.35f
 ) {
     private val interpreter: Interpreter
@@ -31,6 +32,9 @@ class YoloDetector(
 
     private val inputBuffer: ByteBuffer =
         ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3).order(ByteOrder.nativeOrder())
+
+    private val lut = FloatArray(256) { it / 255f }
+    private val chw = FloatArray(3 * inputSize * inputSize)
 
     private val floatBuf = inputBuffer.asFloatBuffer()
     private val pixels = IntArray(inputSize * inputSize)
@@ -50,7 +54,7 @@ class YoloDetector(
                     val gpuOption = compat.bestOptionsForThisDevice.apply {
                         setSerializationParams(
                             context.cacheDir.absolutePath,
-                            "yolo26n_416_v1"
+                            "yolo26n_640_v1"
                         )
                     }
                     gpuDelegate = GpuDelegate(gpuOption)
@@ -90,6 +94,7 @@ class YoloDetector(
     }
 
     fun detect(src: Bitmap, rotation: Int): List<Detection>{
+        val t0 = SystemClock.elapsedRealtime()
         val swap = rotation % 180 != 0
         val uw = if (swap) src.height else src.width
         val uh = if (swap) src.width else src.height
@@ -109,13 +114,16 @@ class YoloDetector(
 
         letterBoxBitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
 
+// в detect(), вместо цикла с floatBuf.put(i, ...):
         val n = inputSize * inputSize
         for (i in 0 until n) {
             val p = pixels[i]
-            floatBuf.put(i, ((p shr 16) and 0xFF) / 255f)
-            floatBuf.put(n+i, ((p shr 8) and 0xFF) / 255f)
-            floatBuf.put(2*n+i, (p and 0xFF) / 255f)
+            chw[i]       = lut[(p shr 16) and 0xFF]
+            chw[n + i]   = lut[(p shr 8) and 0xFF]
+            chw[2 * n + i] = lut[p and 0xFF]
         }
+        floatBuf.rewind()
+        floatBuf.put(chw)
         inputBuffer.rewind()
 
         interpreter.run(inputBuffer, output)
@@ -127,17 +135,18 @@ class YoloDetector(
             val score = row[4]
             if (score < threshold) continue
 
-            var x1 = row[0]; var y1 = row[1]; var x2 = row[2]; var y2 = row[3]
+            val x1 = row[0]; val y1 = row[1]; val x2 = row[2]; val y2 = row[3]
 
             val box = RectF(
-                ((x1 - padX) / scale).coerceIn(0f, src.width.toFloat()),
-                ((y1 - padY) / scale).coerceIn(0f, src.height.toFloat()),
-                ((x2 - padX) / scale).coerceIn(0f, src.width.toFloat()),
-                ((y2 - padY) / scale).coerceIn(0f, src.height.toFloat())
+                ((x1 - padX) / scale).coerceIn(0f, uw.toFloat()),
+                ((y1 - padY) / scale).coerceIn(0f, uh.toFloat()),
+                ((x2 - padX) / scale).coerceIn(0f, uw.toFloat()),
+                ((y2 - padY) / scale).coerceIn(0f, uh.toFloat())
             )
 
             result.add(Detection(box, score, row[5].toInt()))
         }
+
         return result
     }
     fun close(){
