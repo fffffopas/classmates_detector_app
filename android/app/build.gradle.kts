@@ -3,6 +3,9 @@ plugins {
 }
 
 android {
+    androidResources{
+        noCompress += "tflite"
+    }
     namespace = "com.example.myapplication"
     compileSdk {
         version = release(37)
