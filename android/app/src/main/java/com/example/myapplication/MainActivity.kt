@@ -36,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fpsText: TextView
     private lateinit var overlay: OverlayView
     private lateinit var previewView: PreviewView
+    private var frameBytes = ByteArray(0)
 
     private var frameCount = 0
     private var lastFpsTime = SystemClock.elapsedRealtime()
@@ -111,22 +112,32 @@ class MainActivity : AppCompatActivity() {
                     imageProxy.close()
                     return@setAnalyzer
                 }
-
-                val a0 = SystemClock.elapsedRealtime()
-                val bitmap: Bitmap = imageProxy.toBitmap()
-                toBitmapMs = SystemClock.elapsedRealtime() - a0
-                val rotation = imageProxy.imageInfo.rotationDegrees
-                imageProxy.close()
-
+                val w: Int; val h: Int; val stride: Int; val rotation: Int;
+                try {
+                    val plane = imageProxy.planes[0]
+                    val buf = plane.buffer
+                    val size = buf.remaining()
+                    if (frameBytes.size != size) frameBytes = ByteArray(size)
+                    buf.get(frameBytes)
+                    w = imageProxy.width
+                    h = imageProxy.height
+                    stride = plane.rowStride
+                    rotation = imageProxy.imageInfo.rotationDegrees
+                }catch (e: Exception){
+                    busy.set(false)
+                    return@setAnalyzer
+                }finally {
+                    imageProxy.close()
+                }
                 processingScope.launch {
                     try {
                         val t0 = SystemClock.elapsedRealtime()
-                        val dets = detector.detect(bitmap, rotation)
+                        val dets = detector.detect(frameBytes, w, h, stride, rotation)
                         allDetectMs = SystemClock.elapsedRealtime() - t0
 
                         val swap = rotation % 180 != 0
-                        val uw = if (swap) bitmap.height else bitmap.width
-                        val uh = if (swap) bitmap.width else bitmap.height
+                        val uw = if (swap) h else w
+                        val uh = if (swap) w else h
 
                         withContext(Dispatchers.Main) {
                             overlay.update(dets, uw, uh)
