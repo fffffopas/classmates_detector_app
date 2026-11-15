@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Size
+import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -36,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var fpsText: TextView
     private lateinit var overlay: OverlayView
     private lateinit var previewView: PreviewView
+    private var frameBytes = ByteArray(0)
 
     private var frameCount = 0
     private var lastFpsTime = SystemClock.elapsedRealtime()
@@ -49,10 +51,14 @@ class MainActivity : AppCompatActivity() {
         CoroutineScope(SupervisorJob() + inferenceExecutor.asCoroutineDispatcher())
 
     private val busy = AtomicBoolean(false)
+    private var useFront = false
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera()
+            if (granted){
+                startCamera()
+                findViewById<Button>(R.id.switchButton).isEnabled = true
+            }
             else Toast.makeText(this, "Нужно разрешение на камеру", Toast.LENGTH_SHORT).show()
         }
 
@@ -69,6 +75,14 @@ class MainActivity : AppCompatActivity() {
         fpsText = findViewById(R.id.fpsText)
         overlay = findViewById(R.id.overlayView)
         previewView = findViewById(R.id.previewView)
+
+        val switchButton = findViewById<Button>(R.id.switchButton)
+        switchButton.isEnabled = false
+        findViewById<Button>(R.id.switchButton).setOnClickListener {
+            useFront = !useFront
+            overlay.update(emptyList(), 1, 1)
+            startCamera()
+        }
 
         fpsText.text = "Загрузка модели..."
         processingScope.launch {
@@ -111,22 +125,32 @@ class MainActivity : AppCompatActivity() {
                     imageProxy.close()
                     return@setAnalyzer
                 }
-
-                val a0 = SystemClock.elapsedRealtime()
-                val bitmap: Bitmap = imageProxy.toBitmap()
-                toBitmapMs = SystemClock.elapsedRealtime() - a0
-                val rotation = imageProxy.imageInfo.rotationDegrees
-                imageProxy.close()
-
+                val w: Int; val h: Int; val stride: Int; val rotation: Int;
+                try {
+                    val plane = imageProxy.planes[0]
+                    val buf = plane.buffer
+                    val size = buf.remaining()
+                    if (frameBytes.size != size) frameBytes = ByteArray(size)
+                    buf.get(frameBytes)
+                    w = imageProxy.width
+                    h = imageProxy.height
+                    stride = plane.rowStride
+                    rotation = imageProxy.imageInfo.rotationDegrees
+                }catch (e: Exception){
+                    busy.set(false)
+                    return@setAnalyzer
+                }finally {
+                    imageProxy.close()
+                }
                 processingScope.launch {
                     try {
                         val t0 = SystemClock.elapsedRealtime()
-                        val dets = detector.detect(bitmap, rotation)
+                        val dets = detector.detect(frameBytes, w, h, stride, rotation)
                         allDetectMs = SystemClock.elapsedRealtime() - t0
 
                         val swap = rotation % 180 != 0
-                        val uw = if (swap) bitmap.height else bitmap.width
-                        val uh = if (swap) bitmap.width else bitmap.height
+                        val uw = if (swap) h else w
+                        val uh = if (swap) w else h
 
                         withContext(Dispatchers.Main) {
                             overlay.update(dets, uw, uh)
@@ -143,11 +167,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            val selector = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA
+                            else CameraSelector.DEFAULT_BACK_CAMERA
 
             cameraProvider.unbindAll()
             cameraProvider.bindToLifecycle(
                 this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                selector,
                 preview,
                 analysis
             )

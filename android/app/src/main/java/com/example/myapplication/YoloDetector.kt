@@ -14,6 +14,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 import kotlin.math.min
+import kotlin.math.floor
 
 import org.tensorflow.lite.gpu.CompatibilityList
 import org.tensorflow.lite.gpu.GpuDelegate
@@ -23,26 +24,74 @@ data class Detection(val box: RectF, val score: Float, val classId: Int)
 class YoloDetector(
     context: Context,
     modelName: String = "yolo26n.tflite",
-    private val inputSize: Int = 640, // ----------
+    //private val inputSize: Int = 640, // ----------
+    private val inputW: Int = 480,
+    private val inputH: Int = 640,
     private val threshold: Float = 0.35f
 ) {
     private val interpreter: Interpreter
+    private val n = inputW * inputH
+
 
     private var gpuDelegate: GpuDelegate? = null
 
     private val inputBuffer: ByteBuffer =
-        ByteBuffer.allocateDirect(4 * inputSize * inputSize * 3).order(ByteOrder.nativeOrder())
+        ByteBuffer.allocateDirect(4 * n * 3).order(ByteOrder.nativeOrder())
 
     private val lut = FloatArray(256) { it / 255f }
-    private val chw = FloatArray(3 * inputSize * inputSize)
+    private val chw = FloatArray(3 * n)
 
     private val floatBuf = inputBuffer.asFloatBuffer()
-    private val pixels = IntArray(inputSize * inputSize)
-    private val letterBoxBitmap = Bitmap.createBitmap(inputSize, inputSize, Bitmap.Config.ARGB_8888)
-    private val letterBoxCanvas = Canvas(letterBoxBitmap)
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+
+    private val srcMap = IntArray(n)
+    private var mapW = -1
+    private var mapH = -1
+    private var mapStride = -1
+    private var mapRot = -1
+
+    private var uw = 0
+    private var uh = 0
+    private var scale = 1f
+    private var padX = 0f
+    private var padY = 0f
 
     private val output = Array(1){Array(300){ FloatArray(6) } }
+
+    private fun rebuildMap(w: Int, h: Int, stride: Int, rotation: Int){
+        val swap = rotation % 180 != 0
+        uw = if (swap) h else w
+        uh = if (swap) w else h
+        scale = min(inputW / uw.toFloat(), inputH / uh.toFloat())
+        padX = (inputW - uw * scale) / 2f
+        padY = (inputH - uh * scale) / 2f
+
+        for (oy in 0 until inputH) {
+            val uy = floor((oy + 0.5f - padY) / scale).toInt()
+            for (ox in 0 until inputW) {
+                val ux = floor((ox + 0.5f - padX) / scale).toInt()
+                val idx = oy * inputW + ox
+                if (ux !in 0 until uw || uy !in 0 until uh){
+                    srcMap[idx] = -1
+                    continue
+                }
+
+                val sx: Int
+                val sy: Int
+                when (rotation){
+                    90 -> { sx = uy; sy = h - 1 - ux}
+                    180 -> {sx = w - 1 - ux; sy = h - 1 - uy}
+                    270 -> {sx = w - 1 - uy; sy = ux}
+                    else -> {sx = ux; sy = uy}
+
+                }
+                srcMap[idx] = sy * stride + sx * 4
+            }
+        }
+        mapW = w
+        mapH = h
+        mapStride = stride
+        mapRot = rotation
+    }
 
     init {
         val options = Interpreter.Options()
@@ -52,9 +101,10 @@ class YoloDetector(
             if (compat.isDelegateSupportedOnThisDevice){
                 try {
                     val gpuOption = compat.bestOptionsForThisDevice.apply {
+                        setPrecisionLossAllowed(true)
                         setSerializationParams(
                             context.cacheDir.absolutePath,
-                            "yolo26n_640_v1"
+                            "yolo26n_640x480_v1"
                         )
                     }
                     gpuDelegate = GpuDelegate(gpuOption)
@@ -80,7 +130,7 @@ class YoloDetector(
         require(shape.size == 3 && shape[1] == 300 && shape[2] == 6){
             "Неожиданная форма выхода"
         }
-        require(inshape.contentEquals(intArrayOf(1, 3, inputSize, inputSize))){
+        require(inshape.contentEquals(intArrayOf(1, 3, inputH, inputW))){
             "Неожиданный размер изображения"
         }
     }
@@ -93,34 +143,23 @@ class YoloDetector(
         }
     }
 
-    fun detect(src: Bitmap, rotation: Int): List<Detection>{
-        val t0 = SystemClock.elapsedRealtime()
-        val swap = rotation % 180 != 0
-        val uw = if (swap) src.height else src.width
-        val uh = if (swap) src.width else src.height
-
-        val scale = min(inputSize/uw.toFloat(), inputSize/uh.toFloat())
-        val padX = (inputSize - uw*scale) / 2f
-        val padY = (inputSize - uh*scale) / 2f // -----------
-
-        letterBoxCanvas.drawColor(Color.rgb(114, 114, 114))
-        val matrix = Matrix().apply {
-            postTranslate(-src.width / 2f, -src.height / 2f)
-            postRotate(rotation.toFloat())
-            postScale(scale, scale)
-            postTranslate(inputSize / 2f, inputSize / 2f)
+    fun detect(rgba: ByteArray, w: Int, h: Int, rowStride: Int, rotation: Int): List<Detection>{
+        if (w != mapW || h!= mapH || rowStride != mapStride || rotation != mapRot){
+            rebuildMap(w, h, rowStride, rotation)
         }
-        letterBoxCanvas.drawBitmap(src, matrix, paint)
-
-        letterBoxBitmap.getPixels(pixels, 0, inputSize, 0, 0, inputSize, inputSize)
 
 // в detect(), вместо цикла с floatBuf.put(i, ...):
-        val n = inputSize * inputSize
+        val padVal = lut[114]
         for (i in 0 until n) {
-            val p = pixels[i]
-            chw[i]       = lut[(p shr 16) and 0xFF]
-            chw[n + i]   = lut[(p shr 8) and 0xFF]
-            chw[2 * n + i] = lut[p and 0xFF]
+            val o = srcMap[i]
+            if (o < 0){
+                chw[i] = padVal; chw[n + i] = padVal; chw[2 * n + i] = padVal
+            }else {
+
+                chw[i] = lut[rgba[o].toInt() and 0xFF]
+                chw[n + i] = lut[rgba[o + 1].toInt() and 0xFF]
+                chw[2 * n + i] = lut[rgba[o + 2].toInt() and 0xFF]
+            }
         }
         floatBuf.rewind()
         floatBuf.put(chw)
