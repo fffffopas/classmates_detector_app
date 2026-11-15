@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.os.Bundle
 import android.os.SystemClock
 import android.util.Size
+import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
@@ -50,10 +51,14 @@ class MainActivity : AppCompatActivity() {
         CoroutineScope(SupervisorJob() + inferenceExecutor.asCoroutineDispatcher())
 
     private val busy = AtomicBoolean(false)
+    private var useFront = false
 
     private val permissionLauncher =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startCamera()
+            if (granted){
+                startCamera()
+                findViewById<Button>(R.id.switchButton).isEnabled = true
+            }
             else Toast.makeText(this, "Нужно разрешение на камеру", Toast.LENGTH_SHORT).show()
         }
 
@@ -70,6 +75,14 @@ class MainActivity : AppCompatActivity() {
         fpsText = findViewById(R.id.fpsText)
         overlay = findViewById(R.id.overlayView)
         previewView = findViewById(R.id.previewView)
+
+        val switchButton = findViewById<Button>(R.id.switchButton)
+        switchButton.isEnabled = false
+        findViewById<Button>(R.id.switchButton).setOnClickListener {
+            useFront = !useFront
+            overlay.update(emptyList(), 1, 1)
+            startCamera()
+        }
 
         fpsText.text = "Загрузка модели..."
         processingScope.launch {
@@ -154,11 +167,13 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+            val selector = if (useFront) CameraSelector.DEFAULT_FRONT_CAMERA
+                            else CameraSelector.DEFAULT_BACK_CAMERA
 
             cameraProvider.unbindAll()
             cameraProvider.bindToLifecycle(
                 this,
-                CameraSelector.DEFAULT_BACK_CAMERA,
+                selector,
                 preview,
                 analysis
             )
