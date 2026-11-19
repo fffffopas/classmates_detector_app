@@ -12,6 +12,7 @@ class OverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs)
     private var dets: List<Detection> = emptyList()
     private var frameW = 1
     private var frameH = 1
+    var mirror = false
 
     private val boxPaint = Paint().apply {
         color = Color.GREEN
@@ -39,9 +40,14 @@ class OverlayView(context: Context, attrs: AttributeSet?) : View(context, attrs)
 
         for (d in dets) {
             val b = d.box
-            val l = b.left * s + dx
+            val x1 = b.left * s + dx
+            val x2 = b.right * s + dx
+            val l = if (mirror) width - x2 else x1
+            val r = if (mirror) width - x1 else x2
             val t = b.top * s + dy
-            canvas.drawRect(l, t, b.right * s + dx, b.bottom * s + dy, boxPaint)
+            val bot = b.bottom * s + dy
+
+            canvas.drawRect(l, t, r, bot, boxPaint)
             val label = COCO_LABELS.getOrElse(d.classId) { "id${d.classId}" }
             canvas.drawText(
                 "$label ${(d.score * 100).toInt()}%",

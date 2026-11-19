@@ -80,6 +80,7 @@ class MainActivity : AppCompatActivity() {
         switchButton.isEnabled = false
         findViewById<Button>(R.id.switchButton).setOnClickListener {
             useFront = !useFront
+            overlay.mirror = !overlay.mirror
             overlay.update(emptyList(), 1, 1)
             startCamera()
         }
